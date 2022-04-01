@@ -1,0 +1,147 @@
+Instalacion de Pritunl/MONGODB/DNS en Ubuntu 20.04 Focal fossa
+Fecha: 03 de Marzo 2022
+
+#Ejecutar como root, si no  ,agregar sudo al principio de cada comando
+
+Configuracion Previa del sistema
+
+	Cambiamos la zona horaria a la local 
+		timedatectl set-timezone America/Mexico_City
+
+
+	Agregamos a un usuario y le damos permisos sudo (sera el usuario de Webmin)
+		adduser sammy
+		usermod -aG sudo sammy
+
+
+	Firewall
+		Guardamos las reglas actuales de iptables a un archivo 
+			iptables-save > Reglas
+
+		Ya con esto editamos el archivo y agreamos la reglas personalizadas para las conexiones
+			######Reglas Personalizadas########
+			#regla para acceso HTTPS , del portal pritunl 
+			-A INPUT -p tcp -m tcp --dport 443 -j ACCEPT
+			#puerto para acceso a MongoDB
+			-A INPUT -s <CDIR>/24 -d <IP_LOCAL>/32 -p tcp -m tcp --dport 27017 -j ACCEPT
+			#Puerto para acceso Webmin
+			-A INPUT -s <CDIR>/24 -d <IP_LOCAL>/32 -p tcp -m tcp --dport 10000 -j ACCEPT
+			#Puerto para acceso al servicio VPN Pritunl
+			-A INPUT -p udp -m udp --dport <port> -j ACCEPT
+			#Puerto para escucha de DNS
+			-A INPUT -p tcp -m tcp --dport 53 -j ACCEPT
+			-A INPUT -p udp -m udp --dport 53 -j ACCEPT
+			#Puerto para permitir PING solo desde red interna
+			-A INPUT -s <CDIR>/24 -d <IP_LOCAL>/32 -p icmp -m icmp --icmp-type any -j ACCEPT
+			######Fin de Reglas Personalizadas########
+
+		Guardamos las reglas y las restauramos , despues se configuran para que no se pierdan al reiniciar 
+			iptables-restore < Reglas
+			iptables-save > /etc/iptables/rules.v4
+
+
+		Actualizamos y reiniciamos 
+			apt update && apt upgrade && systemctl reboot
+		
+
+
+
+Instalacion de Mongo DB 
+# Instalamos la version 5.0 al ser la más nueva, asi tenemos mas tiempo de EOL
+#Habilitamos autenticacion y cambiamos el binding para ser un poco mas seguro
+	Agregamos repositorios e instalamos
+		wget -qO - https://www.mongodb.org/static/pgp/server-5.0.asc | sudo apt-key add -
+		echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/5.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-5.0.list
+		apt-get update
+		apt-get install -y mongodb-org
+
+	Habilitamos e iniciamos el servicio de MongoD 
+		systemctl enable mongod
+		systemctl start mongod
+
+
+	Agreamos usuarios para posteriormente hacer cambios en la configuracion de BD 
+		-Creamos usuario admin
+			use admin;
+			db.createUser(
+			  {
+			    user: "admin",
+			    pwd: "PASSWORD0",
+			    roles: [
+			      "userAdminAnyDatabase",
+			      "dbAdminAnyDatabase",
+			      "readWriteAnyDatabase"
+			    ]
+			  }
+			);
+
+		-Creamos usuario Pritunl 
+			use pritunl
+			db.createUser(
+			  {
+			    user: "pritunl",
+			    pwd: "PASSWORD1",
+			    roles: [{role: "dbOwner", db: "pritunl"}]
+			  }
+			);
+
+	Cambiamos el binding y activamos control de acceso , en el archivo /etc/mongod.conf 
+		Cambiamos binding	
+			bindIp: <IP>
+
+
+		Habilitamos autenticacion
+			security:
+ 			 authorization: enabled
+
+ 	Reiniciamos mongod para que afecten los cambios 
+ 		systemctl restart mongod
+
+
+Instalacion de Pritunl 
+	Agregamos repositorios 
+		echo "deb http://repo.pritunl.com/stable/apt focal main" | sudo tee /etc/apt/sources.list.d/pritunl.list
+		apt-key adv --keyserver hkp://keyserver.ubuntu.com --recv 7568D9BB55FF9E5287D586017AE645C0CF8E292A
+		apt update
+		apt install -y pritunl
+
+	Instalamos y Habilitamos pritunl
+		systemctl enable pritunl
+		systemctl start pritunl
+
+	Aumentamos limites:
+		sh -c 'echo "* hard nofile 64000" >> /etc/security/limits.conf'
+		sh -c 'echo "* soft nofile 64000" >> /etc/security/limits.conf'
+		sh -c 'echo "root hard nofile 64000" >> /etc/security/limits.conf'
+		sh -c 'echo "root soft nofile 64000" >> /etc/security/limits.conf'
+
+	Nos conectamos a Pritunl con 
+		https://<ip> 
+
+	Usamos la uri de la BD mongo con el usuario Pritunl 
+		mongodb://pritunl:PASSWORD1@<ip>:27017/pritunl?authSource=pritunl
+
+
+Instalacion de DNS/Webmin
+	Agregamos repositorios e instalamos
+		wget -qO - http://www.webmin.com/jcameron-key.asc | sudo apt-key add -
+		sh -c 'echo "deb http://download.webmin.com/download/repository sarge contrib" > /etc/apt/sources.list.d/webmin.list'
+		apt update
+		apt install webmin
+
+	Entramos a webmin con el usuario sammy 
+		https://<IP>:10000
+		#configuramos el DNS etc,etc
+
+		#pendiente
+	Instalamos resolvconf
+	#Esto para evitar que system-resolved nos este actualizando a cada rato la entrad de los DNS a consultar
+	#Si no se hace esto el DNS no funcionara al momento de consultar
+		apt install resolvconf
+
+		#tal vez systemctl disable --now systemd-resolved ?
+		# systemd-resolve dns 10.168.0.202
+		#sudo nano /etc/resolvconf/resolv.conf.d/head
+
+	Editamos el archivo '/etc/resolv.conf' , despues de los comentarios agregamos 
+		nameserver <IP_LOCAL>
